@@ -4,3 +4,4 @@ version = "0.1.0"
 authors = ["Colin Stearns <colin@tomasara.com>"]
 
 [dependencies]
+future = { git = "https://github.com/stearnsc/rust-future.git" }
