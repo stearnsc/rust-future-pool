@@ -5,11 +5,9 @@ extern crate future;
 use future::Future;
 use std::boxed::FnBox;
 use std::collections::VecDeque;
-use std::fmt::Debug;
 use std::mem::drop;
 use std::sync::mpsc::{channel, Sender, Receiver, RecvError, TryRecvError};
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 use std::thread;
 
 type Work = Box<FnBox() -> ()>;
@@ -24,7 +22,6 @@ pub struct FuturePool {
 }
 
 struct WorkerHandler {
-    join_handle: JoinHandle<()>,
     wake_tx: Sender<Message>
 }
 
@@ -53,7 +50,7 @@ impl FuturePool {
 
     pub fn run<F, A, E>(&self, f: F) -> Future<A, E>
         where F: FnOnce() -> Result<A, E> + 'static,
-              A: Debug + 'static, E: Debug + 'static
+              A: 'static, E: 'static
     {
         let (future, setter) = future::new();
         self.add_work(Box::new(|| setter.set_result(f())));
@@ -69,10 +66,16 @@ impl FuturePool {
                 );
             }
         } else if new_thread_count < current_size {
-            for worker_id in new_thread_count..current_size {
+            for worker_id in (new_thread_count..current_size).rev() {
                 let worker = self.workers.remove(worker_id);
                 let _ = worker.wake_tx.send(Message::Shutdown);
             }
+        }
+    }
+
+    pub fn shutdown(self) {
+        for worker in &self.workers {
+            let _ = worker.wake_tx.send(Message::Shutdown);
         }
     }
 
@@ -105,6 +108,12 @@ impl FuturePool {
     }
 }
 
+impl Drop for FuturePool {
+    fn drop(&mut self) {
+        self.resize(0);
+    }
+}
+
 struct Worker {
     worker_id: WorkerId,
     work_queue: Arc<Mutex<VecDeque<Work>>>,
@@ -126,10 +135,9 @@ impl Worker {
             wake_rx: wake_rx
         };
 
-        let join_handle = thread::spawn(move || worker.run());
+        thread::spawn(move || worker.run());
 
         WorkerHandler {
-            join_handle: join_handle,
             wake_tx: wake_tx
         }
     }
@@ -170,7 +178,40 @@ enum Message {
 
 #[cfg(test)]
 mod test {
+    use future::Future;
+    use future;
+    use FuturePool;
+    use std::num;
+
     #[test]
     fn it_works() {
+        let pool = FuturePool::new(5);
+        let f: Future<Vec<i64>, num::ParseIntError> = (1..10)
+            .map(|i| i.to_string())
+            .map(|s| pool.run(move || s.parse::<i64>()))
+            .collect();
+
+        let expected: Vec<i64> = (1..10).into_iter().collect();
+        assert_eq!(expected, future::await(f).unwrap());
+    }
+
+    #[test]
+    fn it_works_after_pauses() {
+        let pool = FuturePool::new(5);
+        let f: Future<Vec<i64>, num::ParseIntError> = (1..10)
+            .map(|i| i.to_string())
+            .map(|s| pool.run(move || s.parse::<i64>()))
+            .collect();
+
+        let expected: Vec<i64> = (1..10).into_iter().collect();
+        assert_eq!(expected, future::await(f).unwrap());
+
+        let f: Future<Vec<i64>, num::ParseIntError> = (10..20)
+            .map(|i| i.to_string())
+            .map(|s| pool.run(move || s.parse::<i64>()))
+            .collect();
+
+        let expected: Vec<i64> = (10..20).into_iter().collect();
+        assert_eq!(expected, future::await(f).unwrap());
     }
 }
